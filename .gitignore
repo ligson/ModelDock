@@ -1,0 +1,22 @@
+# Build output
+/bin/
+/dist/
+/build/
+
+# Frontend dependencies
+frontend/node_modules/
+frontend/dist/
+
+# Local runtime data
+*.db
+*.db-shm
+*.db-wal
+/data/
+/logs/
+/models/
+/downloads/
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
