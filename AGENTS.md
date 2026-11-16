@@ -27,6 +27,7 @@ ModelDock 是一个跨平台本地模型管理中心，目标平台为 Windows�
 - 修改项目文件后同步更新 `CHANGELOG.md`。
 - 重要设计决策必须写入 `docs/`，不能只留在聊天上下文里。
 - 默认本地服务只监听 `127.0.0.1`，局域网访问必须显式开启并有认证保护。
+- 开发环境启动、停止和状态检查统一使用 `scripts/modeldock-dev.sh`，不要直接留下多个 `go run` 服务进程。
 - MLX 脚本适配必须区分平台：非 Windows 使用 `bash` 托管模型项目脚本；Windows 不得假设存在 `sh`，MLX 需返回明确不支持并选择其他运行时。
 - 普通 HTTP JSON 接口统一返回 `{success,data,errorMsg,error}`；成功时 `success=true` 且错误字段为空，失败时 `success=false`、`data=null`、`errorMsg` 使用中文用户提示、`error` 使用稳定机器可读或诊断文本。HTTP 状态码仍表达参数、权限和服务端错误。前端统一通过 `web/src/services/api.ts` 解包 `data`。
 

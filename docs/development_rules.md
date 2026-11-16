@@ -25,6 +25,7 @@
 - 文件操作、下载、进程启动和运行时探测都必须有可诊断日志。
 - 所有长任务支持取消、恢复和失败重试。
 - 不把模型权重、token、密码、Cookie 或代理密码提交到 Git。
+- 本地开发服务统一通过 `scripts/modeldock-dev.sh start|stop|restart|status` 管理；脚本使用 `.modeldock-dev` 保存 PID、日志和临时二进制，该目录不得提交。
 
 ## 模型管理规则
 
