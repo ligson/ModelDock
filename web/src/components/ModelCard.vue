@@ -1,5 +1,5 @@
 <template>
-  <a-card size="small" class="model-card">
+  <a-card size="small" class="model-card local-model-card">
     <template #title><span>{{ model.name }}</span><a v-if="sourceURL(model.source, model.id)" class="model-source-link" :href="sourceURL(model.source, model.id)" target="_blank" rel="noreferrer" title="打开模型社区来源"><LinkOutlined /></a></template>
     <template #extra><a-tag :color="model.available ? 'green' : 'red'">{{ model.available ? '可用' : '不可用' }}</a-tag></template>
     <a-space wrap><a-tag>{{ model.format }}</a-tag><a-tag v-if="model.quantization">{{ model.quantization }}</a-tag><a-tag v-if="model.parameters">{{ model.parameters }}</a-tag></a-space>
