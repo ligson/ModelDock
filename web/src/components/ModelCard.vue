@@ -1,6 +1,6 @@
 <template>
   <a-card size="small" class="model-card">
-    <template #title><span>{{ model.name }}</span></template>
+    <template #title><span>{{ model.name }}</span><a v-if="sourceURL(model.source, model.id)" class="model-source-link" :href="sourceURL(model.source, model.id)" target="_blank" rel="noreferrer" title="打开模型社区来源"><LinkOutlined /></a></template>
     <template #extra><a-tag :color="model.available ? 'green' : 'red'">{{ model.available ? '可用' : '不可用' }}</a-tag></template>
     <a-space wrap><a-tag>{{ model.format }}</a-tag><a-tag v-if="model.quantization">{{ model.quantization }}</a-tag><a-tag v-if="model.parameters">{{ model.parameters }}</a-tag></a-space>
     <p class="muted path">{{ model.localPath || '来源模型，尚未安装' }}</p>
@@ -9,7 +9,9 @@
   </a-card>
 </template>
 <script setup lang="ts">
+import { LinkOutlined } from '@ant-design/icons-vue'
 import type { ModelManifest } from '../types/api'
+import { sourceURL } from '../utils/source'
 defineProps<{ model: ModelManifest }>()
 defineEmits<{ test: [model: ModelManifest]; manage: [model: ModelManifest]; unmanage: [model: ModelManifest]; remove: [model: ModelManifest] }>()
 </script>
