@@ -8,6 +8,16 @@
 - 前端：Vue3、Vite、TypeScript、Ant Design Vue。
 - 构建：Makefile；前端构建产物通过 `go:embed` 嵌入 Go 程序。
 
+## 前端目录与页面规范
+
+- 前端统一使用 Vue 3 + TypeScript + Vite + Ant Design Vue；桌面模式由 Wails 承载同一套前端构建产物，服务模式由 Go HTTP 服务嵌入并提供。
+- `web/src/pages/` 按菜单组织页面，每个菜单页面使用独立目录和 `index.vue`，页面只编排页面状态与组件，不直接拼接 HTML 字符串。
+- `web/src/components/` 只放可复用的业务组件或基础组件；跨页面的模型卡片、任务卡片、布局、状态标签必须复用，不在页面中复制实现。
+- `web/src/services/` 统一封装 HTTP API，`web/src/types/` 统一维护接口类型，页面不得散落 `fetch` 和重复的 JSON 类型定义。
+- 普通 HTTP JSON 接口必须统一返回：`{"success":true,"data":{},"errorMsg":"","error":""}`。成功时 `success` 为 `true` 且 `errorMsg`、`error` 为空；失败时 `success` 为 `false`、`data` 通常为 `null`，`errorMsg` 是中文用户提示，`error` 是稳定的机器可读或诊断文本。HTTP 状态码仍必须正确表达参数、认证、权限和服务端错误。前端请求只能通过 API 服务层统一解包 envelope；文件、图片、视频等二进制响应不套 JSON envelope。
+- `web/src/utils/` 放格式化、状态映射等纯函数；全局样式集中在 `web/src/styles.css`，页面只保留必要的局部样式。
+- `web/dist` 和 `node_modules` 不提交；`make build` 必须先完成前端类型检查和构建，再编译 Go 嵌入产物。
+
 ## 代码规范
 
 - 核心业务代码保持跨平台，不在业务层散落操作系统判断。
@@ -36,3 +46,13 @@
 - 每次实际改动记录到根目录 `CHANGELOG.md`。
 - 设计决策和稳定经验沉淀到 `docs/`。
 - 不提交模型权重、下载缓存、运行日志和本地数据库。
+
+## 首版实现约定
+
+- 用户可见的产品和命令名称统一为 `ModelDock` / `modeldock`，不再使用 `modelhub` 作为 CLI 名称。
+- 首版只面向公开模型来源；来源适配器必须保留扩展点，新增来源不能修改下载任务核心流程。
+- 模型候选项的显示名称统一包含模型名、量化版本和参数规模；不同量化版本必须使用不同候选 ID。
+- 首版下载任务需要具备 Range 断点续传、可配置并发、代理、重试、stalled 检测、取消/恢复和 SHA-256 校验能力。
+- 首版跨平台目标为 Windows、Linux、macOS；平台差异必须通过适配层或构建标签隔离。
+- 首版删除采用物理删除，但必须先检查模型引用和运行实例，并记录可诊断日志。
+- 首版暂不实现账号认证、私有源、模型 revision 锁定和自动性能 benchmark；更新公开源信息时允许刷新到最新数据。

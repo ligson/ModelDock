@@ -1,0 +1,2 @@
+export function bytes(value = 0) { if (!value) return '未知大小'; if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GB`; return `${(value / 1024 ** 2).toFixed(1)} MB` }
+export function statusLabel(status: string) { return ({ queued: '等待中', resolving: '准备中', downloading: '下载中', verifying: '校验中', installed: '已完成', paused: '已暂停', cancelled: '已取消', failed: '失败', stalled: '下载停滞', retrying: '重试中' } as Record<string, string>)[status] || status }

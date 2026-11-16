@@ -1,0 +1,9 @@
+<template><div class="page"><a-row :gutter="16"><a-col :xs="24" :md="8" v-for="item in metrics" :key="item.label"><a-card size="small"><a-statistic :title="item.label" :value="item.value" /><a-typography-text type="secondary">{{ item.detail }}</a-typography-text></a-card></a-col></a-row><a-divider orientation="left">硬件推荐</a-divider><a-row :gutter="16"><a-col :xs="24" :lg="8" v-for="item in recommendations.slice(0,6)" :key="item.model.id"><a-card size="small"><a-card-meta :title="item.model.name" :description="item.reason" /><a-tag class="card-tag">{{ item.status }}</a-tag></a-card></a-col><a-empty v-if="!recommendations.length" description="导入模型后显示推荐" /></a-row><a-divider orientation="left">热门模型</a-divider><a-row :gutter="16"><a-col :xs="24" :md="8" v-for="item in catalog" :key="item.id"><a-card size="small" :title="item.name"><a-tag>{{ item.category }}</a-tag><p>{{ item.description }}</p></a-card></a-col></a-row></div></template>
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import { api } from '../../services/api'
+import type { CatalogItem, Host, Recommendation } from '../../types/api'
+const host = ref<Host>({ os:'', arch:'', capabilities:[], runtimes:[] }); const recommendations = ref<Recommendation[]>([]); const catalog = ref<CatalogItem[]>([])
+const metrics = computed(() => [{ label:'系统', value:`${host.value.os} · ${host.value.arch}`, detail:host.value.cpu || '通用处理器' }, { label:'内存', value:`${host.value.memoryGB || '未知'} GB`, detail:host.value.capabilities.join('、') || '基础 CPU' }, { label:'可用运行时', value:host.value.runtimes.filter(item => item.installed).length, detail:host.value.runtimes.filter(item => item.installed).map(item => item.name).join('、') || '暂未发现' }])
+onMounted(async () => { [host.value, recommendations.value, catalog.value] = await Promise.all([api.host(), api.recommend(), api.catalog()]) })
+</script>
