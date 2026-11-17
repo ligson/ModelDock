@@ -6,12 +6,12 @@
         <a-menu-item v-for="item in items" :key="item.key"><template #icon><component :is="item.icon" /></template>{{ item.label }}</a-menu-item>
       </a-menu>
     </a-layout-sider>
-    <a-layout><a-layout-header class="topbar"><a-space><a-button type="text" @click="collapsed = !collapsed">☰</a-button><span class="topbar-title">{{ title }}</span></a-space><a-tag color="green">本地服务</a-tag></a-layout-header><a-layout-content class="content"><slot /></a-layout-content></a-layout>
+    <a-layout><a-layout-header class="topbar"><a-space><a-button type="text" class="topbar-toggle" @click="collapsed = !collapsed" aria-label="收缩或展开侧栏"><MenuOutlined /></a-button><span class="topbar-title">{{ title }}</span></a-space><a-tag color="green">本地服务</a-tag></a-layout-header><a-layout-content class="content"><slot /></a-layout-content></a-layout>
   </a-layout>
 </template>
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { AppstoreOutlined, CloudDownloadOutlined, DatabaseOutlined, ExperimentOutlined, HomeOutlined, SettingOutlined, ApiOutlined, BgColorsOutlined } from '@ant-design/icons-vue'
+import { AppstoreOutlined, CloudDownloadOutlined, DatabaseOutlined, ExperimentOutlined, HomeOutlined, SettingOutlined, ApiOutlined, BgColorsOutlined, MenuOutlined } from '@ant-design/icons-vue'
 const props = defineProps<{ activeKey: string }>()
 const emit = defineEmits<{ navigate: [key: string] }>()
 const collapsed = ref(false)
