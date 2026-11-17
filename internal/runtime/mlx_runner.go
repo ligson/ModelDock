@@ -97,13 +97,16 @@ func mlxGenerateInput(ctx context.Context, m model.Manifest, input Input) (strin
 }
 
 func mlxProject(modelPath string, m model.Manifest) (root, kind string, err error) {
-	name := strings.ToLower(m.Name + " " + m.ID + " " + strings.Join(m.Task, " "))
-	if strings.Contains(name, "video") || strings.Contains(name, "h3-mlx") || strings.Contains(name, "视频") {
+	name := strings.ToLower(m.Name + " " + m.ID)
+	tasks := strings.ToLower(strings.Join(m.Task, " "))
+	if strings.Contains(tasks, "video") || strings.Contains(tasks, "视频") || strings.Contains(name, "video") || strings.Contains(name, "视频") {
 		kind = "video"
-	} else if strings.Contains(name, "image") || strings.Contains(name, "图片") {
+	} else if strings.Contains(tasks, "image") || strings.Contains(tasks, "图片") || strings.Contains(name, "image") || strings.Contains(name, "图片") {
 		kind = "image"
 	} else {
-		kind = "video"
+		// MLX projects without an explicit task are treated as image projects.
+		// This keeps a generic H3-MLX model from accidentally launching video.
+		kind = "image"
 	}
 	script := "generate-" + kind + ".sh"
 	// New installations keep launchers and their environments outside model
