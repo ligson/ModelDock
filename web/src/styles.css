@@ -49,4 +49,5 @@ body{background:var(--theme-bg);color:var(--theme-text)}.content{background:var(
 [data-theme="celadon"]{--theme-bg:#edf7f3;--theme-surface:#fbfffd;--theme-text:#173b36;--theme-muted:#64857e;--theme-border:#c9e2da;--theme-accent:#2b8874;--theme-sidebar:#123b36;--theme-scroll:#76b6a5;--theme-scroll-track:#dff0eb}
 [data-theme="bamboo"]{--theme-bg:#f7f5e9;--theme-surface:#fffef8;--theme-text:#263b29;--theme-muted:#71806d;--theme-border:#dce2c9;--theme-accent:#537b52;--theme-sidebar:#203526;--theme-scroll:#8eae82;--theme-scroll-track:#e9eedb}
 .interaction-workspace .send-button{width:40px!important;min-width:40px!important;height:40px;padding:0!important;border-radius:12px!important}.interaction-workspace .send-button .anticon{font-size:17px}
+.composer-bar > .ant-upload-wrapper{position:absolute;left:10px;top:50%;z-index:2;transform:translateY(-50%)}.composer-bar > .ant-upload-wrapper .composer-tool{display:inline-flex;align-items:center;justify-content:center}.composer-bar > textarea{padding-left:4px!important}
 @media(max-width:800px){.theme-grid{grid-template-columns:1fr 1fr}}@media(max-width:520px){.theme-grid{grid-template-columns:1fr}}
