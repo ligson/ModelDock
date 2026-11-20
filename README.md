@@ -1,5 +1,7 @@
 # ModelDock
 
+开发环境需要 Go 1.24 或更高版本。macOS/Linux 使用 `scripts/modeldock-dev.sh start|stop|restart|status`；Windows 使用 PowerShell 执行 `scripts/modeldock-dev.ps1 -Action start`，也支持 `stop`、`restart`、`status`。
+
 ModelDock（中文名：模型舱）是一个跨平台本地 AI 模型管理中心。
 
 它不只负责下载模型，还负责判断当前机器适合哪个模型版本、使用什么运行时，以及下载完成后模型是否真的可用。

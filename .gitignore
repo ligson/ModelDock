@@ -11,7 +11,7 @@ web/dist/
 internal/api/static/assets/*.map
 
 # Local build artifacts
-modeldock
+/modeldock
 modeldock.exe
 *.exe
 .modeldock-dev/

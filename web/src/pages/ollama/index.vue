@@ -1,6 +1,6 @@
 <template>
   <div class="page ollama-page">
-    <a-page-header title="Ollama" sub-title="连接本机或局域网中的 Ollama，直接调用已安装模型" />
+    <a-page-header title="Ollama" sub-title="本地推理运行时与已安装模型" />
     <a-card title="连接设置" class="ollama-card">
       <a-space direction="vertical" size="middle" style="width: 100%">
         <a-input v-model:value="baseURL" addon-before="服务地址" placeholder="http://127.0.0.1:11434" />

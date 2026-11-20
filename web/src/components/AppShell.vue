@@ -11,11 +11,11 @@
 </template>
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { AppstoreOutlined, CloudDownloadOutlined, DatabaseOutlined, ExperimentOutlined, HomeOutlined, SettingOutlined, ApiOutlined, BgColorsOutlined, MenuOutlined } from '@ant-design/icons-vue'
+import { AppstoreOutlined, CloudDownloadOutlined, DatabaseOutlined, ExperimentOutlined, HomeOutlined, SettingOutlined, BgColorsOutlined, MenuOutlined, ToolOutlined } from '@ant-design/icons-vue'
 const props = defineProps<{ activeKey: string }>()
 const emit = defineEmits<{ navigate: [key: string] }>()
 const collapsed = ref(false)
-const items = [{ key: 'home', label: '首页', icon: HomeOutlined }, { key: 'market', label: '模型市场', icon: AppstoreOutlined }, { key: 'local', label: '本地模型', icon: DatabaseOutlined }, { key: 'interaction', label: '模型交互', icon: ExperimentOutlined }, { key: 'ollama', label: 'Ollama', icon: ApiOutlined }, { key: 'tasks', label: '下载任务', icon: CloudDownloadOutlined }, { key: 'storage', label: '存储设置', icon: SettingOutlined }, { key: 'theme', label: '主题', icon: BgColorsOutlined }]
+const items = [{ key: 'home', label: '首页', icon: HomeOutlined }, { key: 'market', label: '模型市场', icon: AppstoreOutlined }, { key: 'local', label: '本地模型', icon: DatabaseOutlined }, { key: 'interaction', label: '模型交互', icon: ExperimentOutlined }, { key: 'tasks', label: '下载任务', icon: CloudDownloadOutlined }, { key: 'storage', label: '存储设置', icon: SettingOutlined }, { key: 'runtime', label: '运行时设置', icon: ToolOutlined }, { key: 'theme', label: '主题', icon: BgColorsOutlined }]
 const title = computed(() => items.find(item => item.key === props.activeKey)?.label || 'ModelDock')
 function select({ key }: { key: string }) { emit('navigate', key) }
 </script>

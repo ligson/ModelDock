@@ -41,11 +41,18 @@ func TestDownloadAndPersistModel(t *testing.T) {
 	if finished.Status != "installed" {
 		t.Fatalf("task status = %s, error=%s", finished.Status, finished.Error)
 	}
+	events, err := database.TaskEvents(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 3 || events[0].Kind != "installed" || events[len(events)-1].Kind != "created" {
+		t.Fatalf("unexpected task event history: %+v", events)
+	}
 	saved, err := database.Model(context.Background(), m.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !saved.Available || !saved.Managed || saved.LocalPath == "" {
+	if !saved.Available || saved.Managed || saved.LocalPath == "" {
 		t.Fatalf("model not indexed as installed: %+v", saved)
 	}
 	got, err := os.ReadFile(filepath.Join(saved.LocalPath, "nested", "model.gguf"))
@@ -54,6 +61,36 @@ func TestDownloadAndPersistModel(t *testing.T) {
 	}
 	if string(got) != string(payload) {
 		t.Fatal("downloaded content differs")
+	}
+}
+
+func TestRecoverInterruptedTasksRecordsReason(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task := model.Task{ID: "interrupted", ModelID: "sample", Status: "downloading", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err = database.SaveTask(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	dl := &Manager{DB: database}
+	if err = dl.RecoverInterruptedTasks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := database.Task(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status != "paused" || !strings.Contains(saved.Error, "服务重启") {
+		t.Fatalf("unexpected recovered task: %+v", saved)
+	}
+	events, err := database.TaskEvents(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Kind != "interrupted" {
+		t.Fatalf("unexpected recovery events: %+v", events)
 	}
 }
 

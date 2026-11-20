@@ -51,6 +51,11 @@ func migrate(d *sql.DB) error {
 		current_file TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
 		failure_kind TEXT NOT NULL DEFAULT '', speed_bps INTEGER NOT NULL DEFAULT 0, eta_seconds INTEGER NOT NULL DEFAULT 0
 	);
+	CREATE TABLE IF NOT EXISTS download_task_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, kind TEXT NOT NULL,
+		message TEXT NOT NULL, created_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_download_task_events_task ON download_task_events(task_id,id);
 	CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 	CREATE TABLE IF NOT EXISTS storage_roots (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, name TEXT NOT NULL, is_default INTEGER NOT NULL DEFAULT 0, available INTEGER NOT NULL DEFAULT 0, last_scanned TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);`)
 	if err != nil {
@@ -327,6 +332,44 @@ func (d *DB) SaveTask(ctx context.Context, t model.Task) error {
 	_, err := d.SQL.ExecContext(ctx, `INSERT INTO tasks(id,model_id,status,bytes_total,bytes_done,current_file,error,created_at,updated_at,failure_kind,speed_bps,eta_seconds) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,bytes_total=excluded.bytes_total,bytes_done=excluded.bytes_done,current_file=excluded.current_file,error=excluded.error,updated_at=excluded.updated_at,failure_kind=excluded.failure_kind,speed_bps=excluded.speed_bps,eta_seconds=excluded.eta_seconds`, t.ID, t.ModelID, t.Status, t.BytesTotal, t.BytesDone, t.CurrentFile, t.Error, t.CreatedAt.Format(time.RFC3339Nano), t.UpdatedAt.Format(time.RFC3339Nano), t.FailureKind, t.SpeedBPS, t.ETASeconds)
 	return err
 }
+
+type TaskEvent struct {
+	ID        int64     `json:"id"`
+	TaskID    string    `json:"taskId"`
+	Kind      string    `json:"kind"`
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+func (d *DB) AddTaskEvent(ctx context.Context, taskID, kind, message string) error {
+	_, err := d.SQL.ExecContext(ctx, `INSERT INTO download_task_events(task_id,kind,message,created_at) VALUES(?,?,?,?)`, taskID, kind, message, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (d *DB) TaskEvents(ctx context.Context, taskID string) ([]TaskEvent, error) {
+	rows, err := d.SQL.QueryContext(ctx, `SELECT id,task_id,kind,message,created_at FROM download_task_events WHERE task_id=? ORDER BY id DESC LIMIT 200`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]TaskEvent, 0)
+	for rows.Next() {
+		var event TaskEvent
+		var created string
+		if err = rows.Scan(&event.ID, &event.TaskID, &event.Kind, &event.Message, &created); err != nil {
+			return nil, err
+		}
+		event.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) DeleteTaskEvents(ctx context.Context, taskID string) error {
+	_, err := d.SQL.ExecContext(ctx, `DELETE FROM download_task_events WHERE task_id=?`, taskID)
+	return err
+}
+
 func (d *DB) Tasks(ctx context.Context) ([]model.Task, error) {
 	rows, e := d.SQL.QueryContext(ctx, `SELECT id,model_id,status,bytes_total,bytes_done,current_file,error,created_at,updated_at,failure_kind,speed_bps,eta_seconds FROM tasks ORDER BY updated_at DESC`)
 	if e != nil {
@@ -369,4 +412,18 @@ func (d *DB) Task(ctx context.Context, id string) (model.Task, error) {
 	t.CreatedAt, _ = time.Parse(time.RFC3339Nano, c)
 	t.UpdatedAt, _ = time.Parse(time.RFC3339Nano, u)
 	return t, nil
+}
+
+func (d *DB) DeleteTask(ctx context.Context, id string) error {
+	if err := d.DeleteTaskEvents(ctx, id); err != nil {
+		return err
+	}
+	result, err := d.SQL.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("task %q not found", id)
+	}
+	return nil
 }

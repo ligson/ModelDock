@@ -1,6 +1,7 @@
 package local
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,10 +48,10 @@ func Scan(root string) ([]Candidate, error) {
 			task = "文本"
 		} else if hasRecursive(path, "*.safetensors") {
 			format = "safetensors"
-			task = "文本/图片"
+			task = InferTask(path)
 		} else if hasRecursive(path, "*.bin") || strings.Contains(name, "mlx") {
 			format = "mlx"
-			task = "文本/图片"
+			task = InferTask(path)
 		}
 		if format == "" {
 			return nil
@@ -64,6 +65,42 @@ func Scan(root string) ([]Candidate, error) {
 		return nil
 	})
 	return out, e
+}
+
+// InferTask uses model metadata rather than the weight container format.
+func InferTask(dir string) string {
+	var config struct {
+		Architectures []string `json:"architectures"`
+		ClassName     string   `json:"_class_name"`
+		ModelType     string   `json:"model_type"`
+	}
+	for _, file := range []string{"config.json", "model_index.json"} {
+		data, err := os.ReadFile(filepath.Join(dir, file))
+		if err != nil || json.Unmarshal(data, &config) != nil {
+			continue
+		}
+		metadata := strings.ToLower(strings.Join(config.Architectures, " ") + " " + config.ClassName + " " + config.ModelType)
+		if strings.Contains(metadata, "causallm") || strings.Contains(metadata, "conditionalgeneration") && !strings.Contains(metadata, "whisper") {
+			return "文本"
+		}
+		if strings.Contains(metadata, "wan") || strings.Contains(metadata, "video") {
+			return "视频"
+		}
+		if strings.Contains(metadata, "whisper") || strings.Contains(metadata, "audio") {
+			return "音频"
+		}
+		if strings.Contains(metadata, "diffusion") || strings.Contains(metadata, "flux") || strings.Contains(metadata, "image") {
+			return "图片"
+		}
+	}
+	name := strings.ToLower(filepath.Base(dir))
+	if strings.Contains(name, "wan2") || strings.Contains(name, "t2v") || strings.Contains(name, "video") {
+		return "视频"
+	}
+	if strings.Contains(name, "image") || strings.Contains(name, "diffusion") || strings.Contains(name, "flux") {
+		return "图片"
+	}
+	return "未知"
 }
 func has(dir, pattern string) bool {
 	m, _ := filepath.Glob(filepath.Join(dir, pattern))

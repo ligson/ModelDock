@@ -3,7 +3,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import ModelCard from '../../components/ModelCard.vue'; import { api } from '../../services/api'; import type { ModelManifest } from '../../types/api'
-const models=ref<ModelManifest[]>([]); const scanning=ref(false); const notice=ref(''); const managedModels = computed(() => models.value.filter(item => item.source === 'local' || item.source === 'ollama')); const ollamaModels = computed(() => models.value.filter(item => item.source === 'ollama'))
+const models=ref<ModelManifest[]>([]); const scanning=ref(false); const notice=ref(''); const managedModels = computed(() => models.value.filter(item => item.source === 'local' || item.source === 'ollama' || (item.available && !!item.localPath))); const ollamaModels = computed(() => models.value.filter(item => item.source === 'ollama'))
 async function load(){models.value=await api.models()}; async function scan(){scanning.value=true;try{await api.scan();await load();message.success('扫描完成')}finally{scanning.value=false}}
 async function test(m:ModelManifest){const result=await api.testModel(m.id);message[result.status==='available'?'success':'error'](result.detail)}
 async function manage(m:ModelManifest){await api.manage(m);await load();message.success('已纳入管理')}; async function unmanage(m:ModelManifest){await api.unmanage(m.id);await load();message.success('已取消管理')}

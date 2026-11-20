@@ -5,8 +5,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/ThiraSoft/golem/chat"
@@ -82,34 +80,4 @@ func pureGoGenerate(ctx context.Context, m model.Manifest, prompt string) (strin
 		hidden = opened.Forward.ForwardBatch([]int32{id}, len(ids)-1)[0]
 	}
 	return strings.TrimSpace(out.String()), nil
-}
-
-func ggufPath(m model.Manifest) (string, error) {
-	for _, f := range m.Files {
-		candidates := []string{f.Path}
-		if m.LocalPath != "" && !filepath.IsAbs(f.Path) {
-			candidates = append([]string{filepath.Join(m.LocalPath, f.Path)}, candidates...)
-		}
-		for _, candidate := range candidates {
-			if strings.HasSuffix(strings.ToLower(candidate), ".gguf") {
-				if st, e := os.Stat(candidate); e == nil && !st.IsDir() {
-					return candidate, nil
-				}
-			}
-			if st, e := os.Stat(candidate); e == nil && st.IsDir() {
-				found := ""
-				_ = filepath.Walk(candidate, func(p string, i os.FileInfo, e error) error {
-					if e == nil && i != nil && !i.IsDir() && strings.HasSuffix(strings.ToLower(i.Name()), ".gguf") {
-						found = p
-						return filepath.SkipDir
-					}
-					return nil
-				})
-				if found != "" {
-					return found, nil
-				}
-			}
-		}
-	}
-	return "", fmt.Errorf("no GGUF file found for %s", m.Name)
 }

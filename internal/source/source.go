@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -35,7 +38,61 @@ func httpClient(c *http.Client) *http.Client {
 	if c != nil {
 		return c
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if proxy := configuredProxy(); proxy != nil {
+		transport.Proxy = http.ProxyURL(proxy)
+	}
+	return &http.Client{Timeout: 30 * time.Second, Transport: transport}
+}
+
+// NewHTTPClient returns a client configured with the same proxy discovery used
+// by model metadata requests. Downloads use it as well so a proxy is not lost
+// between fetching a manifest and fetching its large files.
+func NewHTTPClient(timeout time.Duration) *http.Client {
+	client := httpClient(nil)
+	// A zero timeout is intentional for large model downloads. The download
+	// manager enforces a no-byte stall timeout instead of a whole-request limit.
+	client.Timeout = timeout
+	return client
+}
+
+func configuredProxy() *url.URL {
+	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			if proxy, err := parseProxyURL(value); err == nil {
+				return proxy
+			}
+		}
+	}
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	// Windows browsers commonly store the user proxy here while the Go process
+	// has no proxy environment variables. Read only the explicit ProxyServer.
+	out, err := exec.Command("reg", "query", `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`, "/v", "ProxyServer").Output()
+	if err != nil {
+		return nil
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return nil
+	}
+	value := fields[len(fields)-1]
+	if strings.Contains(value, ";") {
+		value = strings.Split(value, ";")[0]
+		if strings.Contains(value, "=") {
+			value = strings.SplitN(value, "=", 2)[1]
+		}
+	}
+	proxy, _ := parseProxyURL(value)
+	return proxy
+}
+
+func parseProxyURL(value string) (*url.URL, error) {
+	if !strings.Contains(value, "://") {
+		value = "http://" + value
+	}
+	return url.Parse(value)
 }
 
 func (h HuggingFace) client() *http.Client {

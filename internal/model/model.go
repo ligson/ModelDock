@@ -32,6 +32,7 @@ type Manifest struct {
 type Task struct {
 	ID          string    `json:"id"`
 	ModelID     string    `json:"modelId"`
+	ModelName   string    `json:"modelName,omitempty"`
 	Status      string    `json:"status"`
 	BytesTotal  int64     `json:"bytesTotal"`
 	BytesDone   int64     `json:"bytesDone"`

@@ -74,6 +74,9 @@ func (r Registry) Plan(ctx context.Context, m model.Manifest, h host.Capability)
 			return a.Detect(ctx, m, h)
 		}
 	}
+	if strings.EqualFold(m.Format, "safetensors") {
+		return Plan{Adapter: "none", Label: "暂不支持", Status: Unsupported, Reason: "当前 SafeTensors 模型没有匹配的推理适配器。文本模型请使用 GGUF 版本配合 llama.cpp，或接入支持该模型的 Transformers 等文本运行时；安装 ComfyUI 不能解决文本模型运行问题"}
+	}
 	return Plan{Adapter: "none", Label: "暂不支持", Status: Unsupported, Reason: fmt.Sprintf("暂时没有适配 %s 格式的本地推理组件", m.Format)}
 }
 func (r Registry) Generate(ctx context.Context, m model.Manifest, prompt string) (string, error) {
@@ -95,7 +98,7 @@ type PureGoAdapter struct{}
 
 func (PureGoAdapter) Name() string { return "pure-go" }
 func (PureGoAdapter) CanHandle(m model.Manifest) bool {
-	return strings.EqualFold(m.Format, "gguf") && (m.Source == "local" || m.LocalPath != "")
+	return pureGoAvailable() && strings.EqualFold(m.Format, "gguf") && (m.Source == "local" || m.LocalPath != "")
 }
 func (PureGoAdapter) Detect(_ context.Context, m model.Manifest, _ host.Capability) Plan {
 	return pureGoDetect(m)
@@ -124,8 +127,10 @@ func (OllamaAdapter) Generate(context.Context, model.Manifest, string) (string, 
 
 type LlamaCPPAdapter struct{}
 
-func (LlamaCPPAdapter) Name() string                    { return "llama.cpp" }
-func (LlamaCPPAdapter) CanHandle(m model.Manifest) bool { return strings.EqualFold(m.Format, "gguf") }
+func (LlamaCPPAdapter) Name() string { return "llama.cpp" }
+func (LlamaCPPAdapter) CanHandle(m model.Manifest) bool {
+	return strings.EqualFold(m.Format, "gguf") && !imageModel(m)
+}
 func (LlamaCPPAdapter) Detect(_ context.Context, _ model.Manifest, h host.Capability) Plan {
 	for _, r := range h.Runtimes {
 		if r.Name == "llama.cpp" && r.Installed {
@@ -135,7 +140,10 @@ func (LlamaCPPAdapter) Detect(_ context.Context, _ model.Manifest, h host.Capabi
 	return Plan{Adapter: "llama.cpp", Label: "llama.cpp", Status: NeedsSetup, Reason: "GGUF 模型需要推理适配器，ModelDock 可负责准备", Setup: []string{"自动下载匹配当前平台的推理组件"}}
 }
 func (LlamaCPPAdapter) Generate(context.Context, model.Manifest, string) (string, error) {
-	return "", fmt.Errorf("llama.cpp generation is handled by the runtime service")
+	return "", fmt.Errorf("llama.cpp generation requires the ModelDock runtime service")
+}
+func (LlamaCPPAdapter) GenerateInput(ctx context.Context, m model.Manifest, input Input) (string, error) {
+	return llamaCPPGenerate(ctx, m, input)
 }
 
 type MLXAdapter struct{}
@@ -167,12 +175,31 @@ type ComfyUIAdapter struct{}
 
 func (ComfyUIAdapter) Name() string { return "comfyui" }
 func (ComfyUIAdapter) CanHandle(m model.Manifest) bool {
+	if imageModel(m) {
+		return true
+	}
 	for _, task := range m.Task {
 		if strings.Contains(strings.ToLower(task), "image") || strings.Contains(strings.ToLower(task), "video") || strings.Contains(strings.ToLower(task), "图片") || strings.Contains(strings.ToLower(task), "视频") {
 			return true
 		}
 	}
 	return strings.EqualFold(m.Format, "diffusers") || strings.EqualFold(m.Format, "comfyui")
+}
+
+func imageModel(m model.Manifest) bool {
+	text := strings.ToLower(m.Name + " " + m.ID + " " + strings.Join(m.Task, " "))
+	for _, marker := range []string{"qwen-image", "qwen_image", "text-to-image", "image-generation", "image-editing", "diffusion", "flux", "sdxl", "wan2"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	for _, task := range m.Task {
+		task = strings.ToLower(task)
+		if strings.Contains(task, "image") || strings.Contains(task, "图片") || strings.Contains(task, "video") || strings.Contains(task, "视频") {
+			return true
+		}
+	}
+	return false
 }
 func (ComfyUIAdapter) Detect(ctx context.Context, _ model.Manifest, h host.Capability) Plan {
 	client := &http.Client{Timeout: 1200 * time.Millisecond}
@@ -193,5 +220,8 @@ func (ComfyUIAdapter) Detect(ctx context.Context, _ model.Manifest, h host.Capab
 	return Plan{Adapter: "comfyui", Label: "ComfyUI", Status: NeedsSetup, Reason: "该模型属于图片或视频工作流，需要 ComfyUI 执行", Setup: []string{"ModelDock 尚未自动准备 ComfyUI 运行环境"}}
 }
 func (ComfyUIAdapter) Generate(context.Context, model.Manifest, string) (string, error) {
-	return "", fmt.Errorf("ComfyUI 工作流执行接口尚未配置")
+	return "", fmt.Errorf("ComfyUI 图片生成需要完整输入，请通过模型交互入口提交提示词")
+}
+func (ComfyUIAdapter) GenerateInput(ctx context.Context, m model.Manifest, input Input) (string, error) {
+	return comfyGenerate(ctx, m, input)
 }

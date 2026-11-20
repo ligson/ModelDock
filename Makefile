@@ -1,7 +1,7 @@
 APP=modeldock
 GO=go
 
-.PHONY: build frontend-install frontend-build frontend-dev test dev release
+.PHONY: build frontend-install frontend-build frontend-dev test dev dev-windows release
 
 NPM ?= npm
 
@@ -23,6 +23,9 @@ test:
 
 dev:
 	$(GO) run ./cmd/modeldock serve
+
+dev-windows:
+	powershell -ExecutionPolicy Bypass -File scripts/modeldock-dev.ps1 start
 
 release:
 	$(MAKE) frontend-build

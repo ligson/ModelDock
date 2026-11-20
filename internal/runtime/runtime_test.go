@@ -10,7 +10,19 @@ import (
 
 func TestRegistryRoutesLocalGGUFToPureGo(t *testing.T) {
 	m := model.Manifest{Source: "local", Format: "gguf"}
-	if got := NewRegistry().Plan(context.Background(), m, host.Capability{}).Adapter; got != "pure-go" {
-		t.Fatalf("adapter = %q, want pure-go", got)
+	want := "llama.cpp"
+	if pureGoAvailable() {
+		want = "pure-go"
+	}
+	if got := NewRegistry().Plan(context.Background(), m, host.Capability{}).Adapter; got != want {
+		t.Fatalf("adapter = %q, want %q", got, want)
+	}
+}
+
+func TestRegistryRoutesQwenImageAwayFromLlama(t *testing.T) {
+	m := model.Manifest{Source: "local", Format: "gguf", Name: "chatrlabs/Qwen-Image-2.1-Uncensored-Omni-Quantized"}
+	plan := NewRegistry().Plan(context.Background(), m, host.Capability{})
+	if plan.Adapter != "comfyui" {
+		t.Fatalf("adapter = %q, want comfyui", plan.Adapter)
 	}
 }

@@ -1,17 +1,22 @@
 package api
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	stdruntime "runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -117,6 +122,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/artifacts/", s.artifact)
 	mux.HandleFunc("/api/runtime/plan", s.runtimePlan)
 	mux.HandleFunc("/api/runtime", s.runtime)
+	mux.HandleFunc("/api/runtime/engines", s.runtimeEngines)
+	mux.HandleFunc("/api/runtime/comfyui", s.comfyUI)
+	mux.HandleFunc("/api/runtime/comfyui/prepare", s.prepareComfyUI)
+	mux.HandleFunc("/api/runtime/comfyui/component-download", s.downloadComfyComponent)
+	mux.HandleFunc("/api/runtime/comfyui/restart", s.restartComfyUI)
+	mux.HandleFunc("/api/runtime/comfyui/start", s.startComfyUI)
+	mux.HandleFunc("/api/runtime/comfyui/log", s.comfyUILog)
 	mux.HandleFunc("/api/ollama", s.ollama)
 	mux.HandleFunc("/api/ollama/import", s.ollamaImport)
 	mux.HandleFunc("/api/local/scan", s.localScan)
@@ -152,6 +164,585 @@ func (s *Server) Handler() http.Handler {
 		w.WriteHeader(status)
 		_, _ = w.Write(capture.body.Bytes())
 	})
+}
+
+// comfyUI downloads the upstream ComfyUI source into a ModelDock-managed
+// directory. External installations are never modified by this endpoint.
+func (s *Server) comfyUI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Path   string `json:"path"`
+		Action string `json:"action"`
+	}
+	if json.NewDecoder(r.Body).Decode(&in) != nil || strings.TrimSpace(in.Path) == "" {
+		http.Error(w, "ComfyUI 目录不能为空", http.StatusBadRequest)
+		return
+	}
+	if in.Action != "install" && in.Action != "update" {
+		http.Error(w, "不支持的 ComfyUI 操作", http.StatusBadRequest)
+		return
+	}
+	path, err := filepath.Abs(strings.TrimSpace(in.Path))
+	if err != nil {
+		http.Error(w, "ComfyUI 目录无效", http.StatusBadRequest)
+		return
+	}
+	configured := s.DB.Setting(r.Context(), "runtime.comfyui.path", "")
+	mode := s.DB.Setting(r.Context(), "runtime.comfyui.mode", "external")
+	if mode != "managed" || (configured != "" && filepath.Clean(configured) != filepath.Clean(path)) {
+		http.Error(w, "只有 ModelDock 管理的 ComfyUI 目录允许自动安装或更新", http.StatusBadRequest)
+		return
+	}
+	if err := installComfySource(r.Context(), path, in.Action == "update"); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	_ = s.DB.SetSetting(r.Context(), "runtime.comfyui.path", path)
+	writeJSON(w, discoverComfyEngine(path, "managed", s.DB.Setting(r.Context(), "runtime.comfyui.api_port", "8188"), "false"))
+}
+
+func (s *Server) startComfyUI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Path string `json:"path"`
+		Port int    `json:"port"`
+	}
+	if json.NewDecoder(r.Body).Decode(&in) != nil || strings.TrimSpace(in.Path) == "" {
+		http.Error(w, "ComfyUI 目录不能为空", http.StatusBadRequest)
+		return
+	}
+	if in.Port < 1 || in.Port > 65535 {
+		in.Port = 8188
+	}
+	if err := startComfyProcess(in.Path, in.Port, s.DB.Setting(r.Context(), "runtime.comfyui.mode", "external") == "managed"); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	mode := s.DB.Setting(r.Context(), "runtime.comfyui.mode", "external")
+	writeJSON(w, discoverComfyEngine(in.Path, mode, fmt.Sprint(in.Port), s.DB.Setting(r.Context(), "runtime.comfyui.auto_update", "false")))
+}
+
+func (s *Server) restartComfyUI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Path string `json:"path"`
+		Port int    `json:"port"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	if strings.TrimSpace(in.Path) == "" {
+		in.Path = s.DB.Setting(r.Context(), "runtime.comfyui.path", "")
+	}
+	if strings.TrimSpace(in.Path) == "" {
+		http.Error(w, "请先在运行时设置中配置 ComfyUI 目录", http.StatusBadRequest)
+		return
+	}
+	if in.Port < 1 || in.Port > 65535 {
+		in.Port = 8188
+	}
+	if err := stopComfyProcess(in.Port); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := startComfyProcess(in.Path, in.Port, s.DB.Setting(r.Context(), "runtime.comfyui.mode", "external") == "managed"); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	mode := s.DB.Setting(r.Context(), "runtime.comfyui.mode", "external")
+	writeJSON(w, discoverComfyEngine(in.Path, mode, fmt.Sprint(in.Port), s.DB.Setting(r.Context(), "runtime.comfyui.auto_update", "false")))
+}
+
+func stopComfyProcess(port int) error {
+	if !comfyHealth(port) {
+		return nil
+	}
+	if stdruntime.GOOS == "windows" {
+		out, err := exec.Command("cmd", "/c", "netstat -ano -p tcp").Output()
+		if err != nil {
+			return fmt.Errorf("无法查找 ComfyUI 进程：%w", err)
+		}
+		needle := fmt.Sprintf(":%d", port)
+		pids := map[string]bool{}
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 5 && strings.Contains(fields[1], needle) {
+				pids[fields[4]] = true
+			}
+		}
+		for pid := range pids {
+			if err := exec.Command("taskkill", "/PID", pid, "/T", "/F").Run(); err != nil {
+				return fmt.Errorf("无法停止 ComfyUI 进程：%w", err)
+			}
+		}
+	} else {
+		if err := exec.Command("sh", "-c", fmt.Sprintf("lsof -ti tcp:%d | xargs -r kill", port)).Run(); err != nil {
+			return fmt.Errorf("无法停止 ComfyUI 进程：%w", err)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		time.Sleep(250 * time.Millisecond)
+		if !comfyHealth(port) {
+			return nil
+		}
+	}
+	return errors.New("ComfyUI 进程未退出，请关闭后重试")
+}
+
+// prepareComfyUI installs the small adapter needed by GGUF image models and
+// adds the selected model directory to ComfyUI's search paths. It is explicit
+// because an external ComfyUI installation must never be changed silently.
+func (s *Server) prepareComfyUI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		ModelID string `json:"modelId"`
+	}
+	if json.NewDecoder(r.Body).Decode(&in) != nil || strings.TrimSpace(in.ModelID) == "" {
+		http.Error(w, "modelId 不能为空", http.StatusBadRequest)
+		return
+	}
+	m, err := s.DB.Model(r.Context(), in.ModelID)
+	if err != nil {
+		http.Error(w, "模型不存在", http.StatusNotFound)
+		return
+	}
+	root := s.DB.Setting(r.Context(), "runtime.comfyui.path", "")
+	if strings.TrimSpace(root) == "" {
+		http.Error(w, "请先在运行时设置中配置 ComfyUI 目录", http.StatusBadRequest)
+		return
+	}
+	if _, err = os.Stat(filepath.Join(root, "main.py")); err != nil {
+		http.Error(w, "ComfyUI 目录中没有 main.py", http.StatusBadRequest)
+		return
+	}
+	if err = installComfyGGUFNode(r.Context(), root); err != nil {
+		http.Error(w, "安装 ComfyUI-GGUF 失败："+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if m.LocalPath == "" {
+		http.Error(w, "模型没有本地路径，无法自动接入 ComfyUI", http.StatusBadRequest)
+		return
+	}
+	if err = addComfyModelPath(root, m.LocalPath); err != nil {
+		http.Error(w, "接入模型目录失败："+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"installed": true, "node": "ComfyUI-GGUF", "modelPath": m.LocalPath, "restartRequired": true, "recommendations": []map[string]any{
+		{"kind": "text_encoder", "name": "qwen3vl_8b_w4a8.safetensors", "folder": "models/text_encoders", "sizeBytes": int64(6312105364), "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_w4a8.safetensors"},
+		{"kind": "vae", "name": "qwen_image_2.1_vae_bf16.safetensors", "folder": "models/vae", "sizeBytes": int64(675509688), "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors"},
+	}, "message": "已安装 ComfyUI-GGUF 并接入模型目录；请重启 ComfyUI 后重新生成。推荐组件：qwen3vl_8b_w4a8.safetensors（约 5.9 GB）放入 models/text_encoders，qwen_image_2.1_vae_bf16.safetensors（约 645 MB）放入 models/vae。下载地址来自 Comfy-Org/Qwen-Image-2.1"})
+}
+
+func (s *Server) downloadComfyComponent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Name string `json:"name"`
+	}
+	if json.NewDecoder(r.Body).Decode(&in) != nil {
+		http.Error(w, "组件参数无效", http.StatusBadRequest)
+		return
+	}
+	components := map[string]struct {
+		Role, Folder, Path string
+	}{
+		"qwen3vl_8b_w4a8.safetensors":         {"Qwen-Image 文本编码器", "text_encoders", "text_encoders/qwen3vl_8b_w4a8.safetensors"},
+		"qwen_image_2.1_vae_bf16.safetensors": {"Qwen-Image VAE 解码器", "vae", "vae/qwen_image_2.1_vae_bf16.safetensors"},
+	}
+	component, ok := components[strings.TrimSpace(in.Name)]
+	if !ok {
+		http.Error(w, "不支持的组件文件", http.StatusBadRequest)
+		return
+	}
+	root := s.DB.Setting(r.Context(), "runtime.comfyui.path", "")
+	if root == "" {
+		http.Error(w, "请先配置 ComfyUI 目录", http.StatusBadRequest)
+		return
+	}
+	manifest, err := (source.HuggingFace{}).Manifest(r.Context(), "Comfy-Org/Qwen-Image-2.1")
+	if err != nil {
+		http.Error(w, "读取 Hugging Face 组件清单失败："+err.Error(), http.StatusBadGateway)
+		return
+	}
+	var file model.File
+	for _, candidate := range manifest.Files {
+		if candidate.Path == component.Path {
+			file = candidate
+			break
+		}
+	}
+	if file.URL == "" {
+		http.Error(w, "官方仓库中未找到该组件文件", http.StatusBadGateway)
+		return
+	}
+	target := filepath.Join(root, "models", component.Folder)
+	if err := os.MkdirAll(target, 0755); err != nil {
+		http.Error(w, "无法创建组件目录："+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	id := "component:qwen-image:" + strings.TrimSuffix(component.Folder, "s") + ":" + strings.TrimSuffix(component.Role, " ")
+	file.Path = in.Name
+	m := model.Manifest{ID: id, Name: in.Name, Source: "huggingface", Format: "safetensors", Task: []string{"comfyui-component"}, LocalPath: target, Available: false, Files: []model.File{file}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := s.DB.SaveModel(r.Context(), m); err != nil {
+		http.Error(w, "保存组件任务失败："+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	task, err := s.Downloads.Start(context.Background(), m)
+	if err != nil {
+		http.Error(w, "创建下载任务失败："+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"task": task, "name": in.Name, "role": component.Role, "target": target})
+}
+
+func (s *Server) comfyUILog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	path := s.DB.Setting(r.Context(), "runtime.comfyui.path", "")
+	if strings.TrimSpace(path) == "" {
+		http.Error(w, "尚未配置 ComfyUI 目录", http.StatusBadRequest)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(path, "modeldock-comfyui.log"))
+	if err != nil && !os.IsNotExist(err) {
+		http.Error(w, "读取 ComfyUI 日志失败："+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	const maxLogBytes = 16000
+	if len(data) > maxLogBytes {
+		data = data[len(data)-maxLogBytes:]
+	}
+	writeJSON(w, map[string]string{"path": filepath.Join(path, "modeldock-comfyui.log"), "content": string(data)})
+}
+
+func startComfyProcess(root string, port int, managed bool) error {
+	root, err := filepath.Abs(strings.TrimSpace(root))
+	if err != nil {
+		return fmt.Errorf("ComfyUI 目录无效：%w", err)
+	}
+	if info, err := os.Stat(filepath.Join(root, "main.py")); err != nil || info.IsDir() {
+		return fmt.Errorf("目录中没有 ComfyUI main.py")
+	}
+	if comfyHealth(port) {
+		return nil
+	}
+	python := ""
+	systemPython := ""
+	for _, candidate := range []string{
+		filepath.Join(root, "python_embeded", "python.exe"),
+		"python", "python3",
+	} {
+		if filepath.IsAbs(candidate) {
+			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+				systemPython = candidate
+				break
+			}
+			continue
+		}
+		if found, lookErr := exec.LookPath(candidate); lookErr == nil {
+			systemPython = found
+			break
+		}
+	}
+	logFile, err := os.OpenFile(filepath.Join(root, "modeldock-comfyui.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("无法创建 ComfyUI 日志：%w", err)
+	}
+	defer logFile.Close()
+	if systemPython == "" {
+		return fmt.Errorf("未找到 Python。请安装 Python 3.10+，ModelDock 会自动准备其余依赖")
+	}
+	python = comfyVenvPython(root)
+	if !managed {
+		if _, statErr := os.Stat(python); statErr != nil {
+			return fmt.Errorf("外部 ComfyUI 未找到独立 Python 环境；请先在该目录准备依赖，ModelDock 不会修改外部目录")
+		}
+	}
+	if managed {
+		if _, statErr := os.Stat(python); statErr != nil {
+			if err := runComfyCommand(logFile, systemPython, "-m", "venv", filepath.Join(root, "venv")); err != nil {
+				return fmt.Errorf("创建 ComfyUI 独立环境失败：%w；请查看日志", err)
+			}
+		}
+		if _, nvidiaErr := exec.LookPath("nvidia-smi"); nvidiaErr == nil && !comfyTorchCUDA(python) {
+			if err := runComfyCommand(logFile, python, "-m", "pip", "install", "--disable-pip-version-check", "--force-reinstall", "--no-deps", "--index-url", "https://download.pytorch.org/whl/cu128", "torch", "torchvision", "torchaudio"); err != nil {
+				return fmt.Errorf("CUDA 版 PyTorch 安装失败：%w；请查看日志", err)
+			}
+			if !comfyTorchCUDA(python) {
+				return fmt.Errorf("已安装依赖，但当前 PyTorch 仍不支持 CUDA；请查看日志")
+			}
+		}
+	}
+	if managed {
+		if _, markerErr := os.Stat(filepath.Join(root, ".modeldock-deps-ready")); markerErr != nil {
+			requirements := filepath.Join(root, "requirements.txt")
+			if _, reqErr := os.Stat(requirements); reqErr != nil {
+				return fmt.Errorf("未找到 requirements.txt")
+			}
+			if err := runComfyCommand(logFile, python, "-m", "pip", "install", "--disable-pip-version-check", "-r", requirements); err != nil {
+				return fmt.Errorf("ComfyUI 依赖安装失败：%w；请查看日志", err)
+			}
+			if markerErr := os.WriteFile(filepath.Join(root, ".modeldock-deps-ready"), []byte(time.Now().UTC().Format(time.RFC3339)), 0644); markerErr != nil {
+				return fmt.Errorf("无法保存依赖状态：%w", markerErr)
+			}
+		}
+	}
+	cmd := exec.Command(python, "main.py", "--listen", "127.0.0.1", "--port", fmt.Sprint(port))
+	cmd.Dir, cmd.Stdout, cmd.Stderr = root, logFile, logFile
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("启动 ComfyUI 失败：%w", err)
+	}
+	go func() { _ = cmd.Wait() }()
+	for i := 0; i < 20; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if comfyHealth(port) {
+			return nil
+		}
+	}
+	return fmt.Errorf("ComfyUI 进程已启动但服务未响应，请查看 %s", filepath.Join(root, "modeldock-comfyui.log"))
+}
+
+func comfyTorchCUDA(python string) bool {
+	out, err := exec.Command(python, "-c", "import torch; print('1' if torch.cuda.is_available() else '0')").Output()
+	return err == nil && strings.TrimSpace(string(out)) == "1"
+}
+
+func comfyVenvPython(root string) string {
+	if stdruntime.GOOS == "windows" {
+		return filepath.Join(root, "venv", "Scripts", "python.exe")
+	}
+	return filepath.Join(root, "venv", "bin", "python")
+}
+
+func runComfyCommand(logFile *os.File, command string, args ...string) error {
+	_, _ = fmt.Fprintf(logFile, "\n[%s] ModelDock 自动执行：%s %s\n", time.Now().UTC().Format(time.RFC3339), command, strings.Join(args, " "))
+	cmd := exec.Command(command, args...)
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	return cmd.Run()
+}
+
+func installComfySource(ctx context.Context, target string, update bool) error {
+	if !update {
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			if _, mainErr := os.Stat(filepath.Join(target, "main.py")); mainErr == nil {
+				return fmt.Errorf("目标目录已经存在 ComfyUI，请使用更新操作")
+			}
+			entries, readErr := os.ReadDir(target)
+			if readErr != nil {
+				return fmt.Errorf("无法检查目标目录：%w", readErr)
+			}
+			if len(entries) == 0 {
+				if removeErr := os.Remove(target); removeErr != nil {
+					return fmt.Errorf("无法准备空目标目录：%w", removeErr)
+				}
+			} else {
+				return fmt.Errorf("目标目录已有文件，请选择空目录或使用更新操作")
+			}
+		}
+	}
+	archiveURL := "https://codeload.github.com/comfyanonymous/ComfyUI/zip/refs/heads/master"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, archiveURL, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 2 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("下载 ComfyUI 失败：%w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("下载 ComfyUI 失败：HTTP %s", resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+	if err != nil {
+		return fmt.Errorf("读取 ComfyUI 压缩包失败：%w", err)
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("ComfyUI 下载内容为空")
+	}
+	temp, err := os.MkdirTemp(filepath.Dir(target), ".modeldock-comfyui-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(temp)
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return fmt.Errorf("ComfyUI 压缩包无效：%w", err)
+	}
+	root := ""
+	for _, file := range reader.File {
+		name := filepath.ToSlash(file.Name)
+		parts := strings.Split(strings.Trim(name, "/"), "/")
+		if len(parts) < 2 || parts[0] == "" {
+			continue
+		}
+		if root == "" {
+			root = parts[0]
+		}
+		if parts[0] != root || strings.Contains(name, "..") {
+			continue
+		}
+		rel := filepath.FromSlash(strings.Join(parts[1:], "/"))
+		outPath := filepath.Join(temp, rel)
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(outPath, 0755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+			return err
+		}
+		in, err := file.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.Create(outPath)
+		if err == nil {
+			_, err = io.Copy(out, in)
+			_ = out.Close()
+		}
+		_ = in.Close()
+		if err != nil {
+			return err
+		}
+	}
+	if _, err := os.Stat(filepath.Join(temp, "main.py")); err != nil {
+		return fmt.Errorf("ComfyUI 压缩包中没有 main.py")
+	}
+	backup := ""
+	if update {
+		if _, err := os.Stat(target); err == nil {
+			backup = target + ".backup-" + time.Now().UTC().Format("20060102-150405")
+			if err := os.Rename(target, backup); err != nil {
+				return fmt.Errorf("备份旧 ComfyUI 失败：%w", err)
+			}
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return err
+	}
+	if err := os.Rename(temp, target); err != nil {
+		if backup != "" {
+			_ = os.Rename(backup, target)
+		}
+		return fmt.Errorf("安装 ComfyUI 失败：%w", err)
+	}
+	// temp is now the installed target; do not remove it in the deferred cleanup.
+	temp = ""
+	return nil
+}
+
+func installComfyGGUFNode(ctx context.Context, root string) error {
+	target := filepath.Join(root, "custom_nodes", "ComfyUI-GGUF")
+	if _, err := os.Stat(filepath.Join(target, "nodes.py")); err == nil {
+		return nil
+	}
+	resp, err := (&http.Client{Timeout: 2 * time.Minute}).Do(func() *http.Request {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://codeload.github.com/city96/ComfyUI-GGUF/zip/refs/heads/main", nil)
+		return req
+	}())
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("HTTP %s", resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 100<<20))
+	if err != nil {
+		return err
+	}
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return err
+	}
+	temp, err := os.MkdirTemp(filepath.Join(root, "custom_nodes"), ".modeldock-gguf-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(temp)
+	base := ""
+	for _, file := range reader.File {
+		parts := strings.Split(strings.Trim(filepath.ToSlash(file.Name), "/"), "/")
+		if len(parts) < 2 || strings.Contains(file.Name, "..") {
+			continue
+		}
+		if base == "" {
+			base = parts[0]
+		}
+		if parts[0] != base {
+			continue
+		}
+		outPath := filepath.Join(temp, filepath.FromSlash(strings.Join(parts[1:], "/")))
+		if file.FileInfo().IsDir() {
+			if err = os.MkdirAll(outPath, 0755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err = os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+			return err
+		}
+		in, openErr := file.Open()
+		if openErr != nil {
+			return openErr
+		}
+		out, createErr := os.Create(outPath)
+		if createErr == nil {
+			_, createErr = io.Copy(out, in)
+			_ = out.Close()
+		}
+		_ = in.Close()
+		if createErr != nil {
+			return createErr
+		}
+	}
+	if _, err = os.Stat(filepath.Join(temp, "nodes.py")); err != nil {
+		return errors.New("压缩包中没有 nodes.py")
+	}
+	if _, err = os.Stat(target); err == nil {
+		_ = os.RemoveAll(target)
+	}
+	if err = os.Rename(temp, target); err != nil {
+		return err
+	}
+	temp = ""
+	return nil
+}
+
+func addComfyModelPath(root, modelPath string) error {
+	modelPath, err := filepath.Abs(modelPath)
+	if err != nil {
+		return err
+	}
+	config := filepath.Join(root, "extra_model_paths.yaml")
+	data, _ := os.ReadFile(config)
+	marker := "# ModelDock managed model path"
+	if strings.Contains(string(data), marker) {
+		return nil
+	}
+	entry := fmt.Sprintf("\n%s\nmodeldock:\n  base_path: %s\n  unet: .\n  diffusion_models: .\n  clip: .\n  text_encoders: .\n  vae: .\n", marker, yamlPath(modelPath))
+	return os.WriteFile(config, append(data, []byte(entry)...), 0644)
+}
+
+func yamlPath(path string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(path, "\\", "/"), "\"", "\\\"")
 }
 func writeJSON(w http.ResponseWriter, v any) {
 	writeJSONStatus(w, http.StatusOK, APIResponse{Success: true, Data: v})
@@ -521,6 +1112,11 @@ func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
+	for i := range v {
+		if m, err := s.DB.Model(r.Context(), v[i].ModelID); err == nil {
+			v[i].ModelName = m.Name
+		}
+	}
 	writeJSON(w, v)
 }
 
@@ -531,6 +1127,36 @@ func (s *Server) task(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := parts[0]
+	if r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "events" {
+		if _, e := s.DB.Task(r.Context(), id); e != nil {
+			http.Error(w, e.Error(), 404)
+			return
+		}
+		events, e := s.DB.TaskEvents(r.Context(), id)
+		if e != nil {
+			http.Error(w, e.Error(), 500)
+			return
+		}
+		writeJSON(w, events)
+		return
+	}
+	if r.Method == http.MethodDelete && len(parts) == 1 {
+		t, e := s.DB.Task(r.Context(), id)
+		if e != nil {
+			http.Error(w, e.Error(), 404)
+			return
+		}
+		if slices.Contains([]string{"queued", "resolving", "downloading", "verifying", "retrying"}, t.Status) {
+			http.Error(w, "请先暂停或取消下载任务", 409)
+			return
+		}
+		if e = s.DB.DeleteTask(r.Context(), id); e != nil {
+			http.Error(w, e.Error(), 404)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method == http.MethodPost && len(parts) == 2 {
 		switch parts[1] {
 		case "pause", "cancel", "resume":
@@ -549,6 +1175,11 @@ func (s *Server) task(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, e.Error(), 404)
 					return
 				}
+				kind, detail := "paused", "用户暂停了下载任务"
+				if status == "cancelled" {
+					kind, detail = "cancelled", "用户取消了下载任务"
+				}
+				_ = s.DB.AddTaskEvent(r.Context(), id, kind, detail)
 			}
 			writeJSON(w, map[string]string{"status": parts[1]})
 			return
@@ -568,9 +1199,11 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "q is required", 400)
 		return
 	}
-	v, e := source.Search(r.Context(), src, q)
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	v, e := source.Search(ctx, src, q)
 	if e != nil {
-		http.Error(w, e.Error(), 502)
+		http.Error(w, "模型源搜索失败，请检查网络连接或稍后重试", 502)
 		return
 	}
 	writeJSON(w, v)
@@ -581,8 +1214,11 @@ func (s *Server) manifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Source string `json:"source"`
-		ID     string `json:"id"`
+		Source        string `json:"source"`
+		ID            string `json:"id"`
+		Quantization  string `json:"quantization"`
+		IncludeMMProj bool   `json:"includeMmproj"`
+		InspectOnly   bool   `json:"inspectOnly"`
 	}
 	if e := json.NewDecoder(r.Body).Decode(&in); e != nil || in.ID == "" {
 		http.Error(w, "source and id are required", 400)
@@ -593,20 +1229,98 @@ func (s *Server) manifest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 502)
 		return
 	}
-	if e = s.DB.SaveModel(r.Context(), m); e != nil {
-		http.Error(w, e.Error(), 500)
-		return
+	if strings.TrimSpace(in.Quantization) != "" {
+		m, e = selectGGUFQuantization(m, in.Quantization, in.IncludeMMProj)
+		if e != nil {
+			http.Error(w, e.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+	}
+	if !in.InspectOnly {
+		if e = s.DB.SaveModel(r.Context(), m); e != nil {
+			http.Error(w, e.Error(), 500)
+			return
+		}
 	}
 	writeJSON(w, m)
 }
-func (s *Server) host(w http.ResponseWriter, r *http.Request) { writeJSON(w, host.Detect(r.Context())) }
+
+func selectGGUFQuantization(m model.Manifest, quantization string, includeMMProj bool) (model.Manifest, error) {
+	if m.Format != "gguf" {
+		return m, fmt.Errorf("所选仓库不是 GGUF 格式，无法按量化版本下载")
+	}
+	quant := strings.ToLower(strings.TrimSpace(quantization))
+	selected := make([]model.File, 0, 1)
+	for _, file := range m.Files {
+		name := strings.ToLower(filepath.Base(file.Path))
+		if ggufFileMatchesQuantization(name, quant) && !strings.Contains(name, "mmproj") {
+			selected = append(selected, file)
+		}
+	}
+	if len(selected) != 1 {
+		return m, fmt.Errorf("仓库中没有唯一匹配的 GGUF 量化文件，请重新选择版本")
+	}
+	if includeMMProj {
+		var projection *model.File
+		for i := range m.Files {
+			name := strings.ToLower(filepath.Base(m.Files[i].Path))
+			if !strings.Contains(name, "mmproj") || !strings.HasSuffix(name, ".gguf") {
+				continue
+			}
+			if strings.Contains(name, "q8_0") {
+				projection = &m.Files[i]
+				break
+			}
+			if projection == nil || strings.Contains(name, "f16") {
+				projection = &m.Files[i]
+			}
+		}
+		if projection == nil {
+			return m, fmt.Errorf("所选仓库没有可用的 mmproj 多模态投影文件")
+		}
+		selected = append(selected, *projection)
+	}
+	m.Files = selected
+	m.Quant = strings.ToUpper(quantization)
+	m.ID = m.ID + "-gguf-" + strings.ToLower(quant)
+	m.Name = m.Name + " · " + strings.ToUpper(quantization)
+	return m, nil
+}
+
+func ggufFileMatchesQuantization(name, quant string) bool {
+	name = strings.TrimSuffix(strings.ToLower(name), ".gguf")
+	quant = strings.ToLower(strings.TrimSpace(quant))
+	if quant == "" || !strings.HasSuffix(name, quant) {
+		return false
+	}
+	if len(name) == len(quant) {
+		return true
+	}
+	separator := name[len(name)-len(quant)-1]
+	return separator == '.' || separator == '-' || separator == '_'
+}
+
+func (s *Server) detectHost(ctx context.Context) host.Capability {
+	if path := strings.TrimSpace(s.DB.Setting(ctx, "runtime.llama_cpp.path", "")); path != "" {
+		_ = os.Setenv("MODELDOCK_LLAMA_CPP_PATH", path)
+	}
+	mode := strings.TrimSpace(s.DB.Setting(ctx, "runtime.llama_cpp.mode", "cuda"))
+	_ = os.Setenv("MODELDOCK_LLAMA_CPP_MODE", mode)
+	if path := strings.TrimSpace(s.DB.Setting(ctx, "runtime.comfyui.path", "")); path != "" {
+		_ = os.Setenv("MODELDOCK_COMFYUI_PATH", path)
+	}
+	return host.Detect(ctx)
+}
+func (s *Server) host(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.detectHost(r.Context()))
+}
 func (s *Server) recommend(w http.ResponseWriter, r *http.Request) {
 	ms, e := s.DB.Models(r.Context())
 	if e != nil {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	h := host.Detect(r.Context())
+	h := s.detectHost(r.Context())
 	out := make([]recommend.Result, 0, len(ms))
 	for _, m := range ms {
 		out = append(out, recommend.One(m, h))
@@ -754,11 +1468,19 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "model not found", 404)
 		return
 	}
+	if !m.Managed {
+		writeJSON(w, map[string]any{"status": "not_ready", "message": "模型尚未纳入管理，请先在本地模型页面完成纳入管理", "runtime": map[string]string{"status": "needs_setup"}})
+		return
+	}
+	if !m.Available {
+		writeJSON(w, map[string]any{"status": "not_ready", "message": "模型文件当前不可用，请先扫描模型目录或检查存储磁盘", "runtime": map[string]string{"status": "needs_setup"}})
+		return
+	}
 	reg := s.Runtimes
 	if len(reg.Adapters()) == 0 {
 		reg = runtime.NewRegistry()
 	}
-	plan := reg.Plan(r.Context(), m, host.Detect(r.Context()))
+	plan := reg.Plan(r.Context(), m, s.detectHost(r.Context()))
 	if plan.Status != runtime.Ready {
 		writeJSON(w, map[string]any{"status": "not_ready", "message": plan.Reason, "runtime": plan})
 		return
@@ -1011,7 +1733,7 @@ func (s *Server) runtimePlan(w http.ResponseWriter, r *http.Request) {
 	if len(reg.Adapters()) == 0 {
 		reg = runtime.NewRegistry()
 	}
-	writeJSON(w, reg.Plan(r.Context(), m, host.Detect(r.Context())))
+	writeJSON(w, reg.Plan(r.Context(), m, s.detectHost(r.Context())))
 }
 
 func (s *Server) runtime(w http.ResponseWriter, r *http.Request) {
@@ -1046,6 +1768,212 @@ func (s *Server) runtime(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = os.Setenv("MODELDOCK_RUNTIME_ROOT", root)
 	writeJSON(w, runtimeDirectoryStatus(root))
+}
+
+type runtimeEngine struct {
+	Name       string `json:"name"`
+	Installed  bool   `json:"installed"`
+	Path       string `json:"path,omitempty"`
+	Version    string `json:"version,omitempty"`
+	Mode       string `json:"mode"`
+	APIPort    int    `json:"apiPort"`
+	Source     string `json:"source"`
+	Managed    bool   `json:"managed,omitempty"`
+	Healthy    bool   `json:"healthy,omitempty"`
+	AutoUpdate bool   `json:"autoUpdate,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+}
+
+func (s *Server) runtimeEngines(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	ctx := r.Context()
+	path := s.DB.Setting(ctx, "runtime.llama_cpp.path", "")
+	mode := s.DB.Setting(ctx, "runtime.llama_cpp.mode", "cuda")
+	portText := s.DB.Setting(ctx, "runtime.llama_cpp.api_port", "8686")
+	port := 8686
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil || port < 1 || port > 65535 {
+		port = 8686
+	}
+	if r.Method == http.MethodPost {
+		var in struct {
+			Path            string `json:"path"`
+			Mode            string `json:"mode"`
+			APIPort         int    `json:"apiPort"`
+			ComfyPath       string `json:"comfyPath"`
+			ComfyMode       string `json:"comfyMode"`
+			ComfyPort       int    `json:"comfyPort"`
+			ComfyAutoUpdate bool   `json:"comfyAutoUpdate"`
+		}
+		if json.NewDecoder(r.Body).Decode(&in) != nil {
+			http.Error(w, "运行时配置格式无效", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(in.Path) != "" {
+			p, err := filepath.Abs(strings.TrimSpace(in.Path))
+			if err != nil {
+				http.Error(w, "llama.cpp 路径无效", 400)
+				return
+			}
+			if _, err = os.Stat(p); err != nil {
+				http.Error(w, "找不到 llama.cpp 可执行文件或目录", 400)
+				return
+			}
+			path = p
+			_ = s.DB.SetSetting(ctx, "runtime.llama_cpp.path", path)
+			_ = os.Setenv("MODELDOCK_LLAMA_CPP_PATH", path)
+		}
+		if in.Mode == "cpu" || in.Mode == "cuda" {
+			mode = in.Mode
+			_ = s.DB.SetSetting(ctx, "runtime.llama_cpp.mode", mode)
+		}
+		if in.APIPort >= 1 && in.APIPort <= 65535 {
+			port = in.APIPort
+			_ = s.DB.SetSetting(ctx, "runtime.llama_cpp.api_port", fmt.Sprint(port))
+		}
+		if strings.TrimSpace(in.ComfyPath) != "" {
+			p, err := filepath.Abs(strings.TrimSpace(in.ComfyPath))
+			if err != nil {
+				http.Error(w, "ComfyUI 路径无效", 400)
+				return
+			}
+			if info, statErr := os.Stat(p); statErr != nil || !info.IsDir() {
+				http.Error(w, "找不到 ComfyUI 目录", 400)
+				return
+			}
+			_ = s.DB.SetSetting(ctx, "runtime.comfyui.path", p)
+		}
+		if in.ComfyMode == "managed" || in.ComfyMode == "external" {
+			_ = s.DB.SetSetting(ctx, "runtime.comfyui.mode", in.ComfyMode)
+		}
+		if in.ComfyPort >= 1 && in.ComfyPort <= 65535 {
+			_ = s.DB.SetSetting(ctx, "runtime.comfyui.api_port", fmt.Sprint(in.ComfyPort))
+		}
+		_ = s.DB.SetSetting(ctx, "runtime.comfyui.auto_update", fmt.Sprint(in.ComfyAutoUpdate))
+	}
+	llama := discoverLlamaEngine(path, s.DB.Setting(ctx, "runtime.root", runtime.ConfiguredRoot()))
+	llama.Mode, llama.APIPort = mode, port
+	engines := []runtimeEngine{llama}
+	comfyMode := s.DB.Setting(ctx, "runtime.comfyui.mode", "external")
+	comfyPath := s.DB.Setting(ctx, "runtime.comfyui.path", "")
+	if comfyMode == "managed" && strings.TrimSpace(comfyPath) == "" {
+		root := s.DB.Setting(ctx, "runtime.root", runtime.ConfiguredRoot())
+		if strings.TrimSpace(root) != "" {
+			comfyPath = filepath.Join(root, "comfyui")
+		}
+	}
+	comfy := discoverComfyEngine(comfyPath, comfyMode, s.DB.Setting(ctx, "runtime.comfyui.api_port", "8188"), s.DB.Setting(ctx, "runtime.comfyui.auto_update", "false"))
+	engines = append(engines, comfy)
+	for _, detected := range s.detectHost(ctx).Runtimes {
+		if detected.Name == "llama.cpp" || detected.Name == "comfyui" {
+			continue
+		}
+		engines = append(engines, runtimeEngine{
+			Name: detected.Name, Installed: detected.Installed, Path: detected.Path,
+			Version: detected.Version, Mode: "系统探测", APIPort: 0,
+			Source: "主机探测",
+		})
+	}
+	writeJSON(w, map[string]any{"engines": engines})
+}
+
+func discoverComfyEngine(configured, mode, portText, autoUpdate string) runtimeEngine {
+	port := 8188
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil || port < 1 || port > 65535 {
+		port = 8188
+	}
+	e := runtimeEngine{Name: "comfyui", Mode: mode, APIPort: port, Path: configured, Source: "未发现", Managed: mode == "managed", AutoUpdate: strings.EqualFold(autoUpdate, "true")}
+	candidates := []string{}
+	if strings.TrimSpace(configured) != "" {
+		candidates = append(candidates, configured)
+	}
+	if root, err := os.UserConfigDir(); err == nil {
+		candidates = append(candidates, filepath.Join(root, "ModelDock", "runtimes", "comfyui"))
+	}
+	if root := runtime.ConfiguredRoot(); root != "" {
+		candidates = append(candidates, filepath.Join(root, "comfyui"))
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		main := filepath.Join(candidate, "main.py")
+		if _, err = os.Stat(main); err != nil {
+			continue
+		}
+		e.Installed, e.Path, e.Source = true, candidate, "已配置"
+		if e.Managed && configured == "" {
+			e.Source = "ModelDock 运行时目录"
+		}
+		e.Healthy = comfyHealth(port)
+		e.Detail = "已找到 ComfyUI；" + map[bool]string{true: "服务已连接", false: "服务未启动"}[e.Healthy]
+		return e
+	}
+	if p, err := exec.LookPath("comfy"); err == nil {
+		e.Installed, e.Path, e.Source = true, p, "PATH"
+		e.Healthy = comfyHealth(port)
+		e.Detail = "已找到命令行入口；" + map[bool]string{true: "服务已连接", false: "服务未启动"}[e.Healthy]
+	}
+	return e
+}
+
+func comfyHealth(port int) bool {
+	client := &http.Client{Timeout: 1200 * time.Millisecond}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/system_stats", port))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode/100 == 2
+}
+
+func discoverLlamaEngine(configured, root string) runtimeEngine {
+	e := runtimeEngine{Name: "llama.cpp", Mode: "cuda", Source: "未发现"}
+	candidates := []string{}
+	if configured != "" {
+		candidates = append(candidates, configured)
+	}
+	if p, err := os.UserConfigDir(); err == nil {
+		candidates = append(candidates, filepath.Join(p, "ModelDock", "runtimes", "llama.cpp"))
+	}
+	if root != "" {
+		candidates = append(candidates, filepath.Join(root, "llama.cpp"))
+	}
+	for _, name := range []string{"llama-server", "llama-cli", "llama-run"} {
+		if p, err := exec.LookPath(name); err == nil {
+			candidates = append(candidates, p)
+		}
+		if stdruntime.GOOS == "windows" {
+			if p, err := exec.LookPath(name + ".exe"); err == nil {
+				candidates = append(candidates, p)
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		p := candidate
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			p = filepath.Join(p, "llama-server")
+			if stdruntime.GOOS == "windows" {
+				p += ".exe"
+			}
+		}
+		info, err := os.Stat(p)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		e.Installed, e.Path, e.Source = true, p, "已配置"
+		if out, err := exec.Command(p, "--version").CombinedOutput(); err == nil {
+			e.Version = strings.TrimSpace(string(out))
+			if len(e.Version) > 120 {
+				e.Version = e.Version[:120]
+			}
+		}
+		return e
+	}
+	return e
 }
 
 func runtimeDirectoryStatus(root string) map[string]any {
