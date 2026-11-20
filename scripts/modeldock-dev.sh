@@ -12,7 +12,7 @@ usage() { printf 'Usage: %s {start|stop|restart|status}\n' "$(basename "$0")"; }
 is_running() { [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
 
 start() {
-  if is_running; then echo "ModelDock 已运行（PID $(cat "$PID_FILE")，端口 $PORT）"; return 0; fi
+  if is_running; then echo "ModelDock 已运行（PID $(cat "$PID_FILE")，端口 ${PORT}）"; return 0; fi
   mkdir -p "$STATE_DIR" "$MODEL_ROOT"
   go build -o "$STATE_DIR/modeldock" ./cmd/modeldock
   nohup "$STATE_DIR/modeldock" serve --addr "127.0.0.1:$PORT" --root "$MODEL_ROOT" >"$LOG_FILE" 2>&1 &
