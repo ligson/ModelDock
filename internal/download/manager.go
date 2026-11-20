@@ -622,11 +622,18 @@ func (m *Manager) stop(t model.Task) {
 	_ = m.DB.AddTaskEvent(context.Background(), t.ID, kind, t.Error)
 }
 func (m *Manager) fail(t model.Task, err error) {
-	t.Status, t.Error, t.FailureKind = "failed", err.Error(), classify(err)
+	t.FailureKind = classify(err)
+	t.Status = "failed"
+	if t.FailureKind == "stalled" {
+		t.Status = "stalled"
+		t.Error = "下载长时间没有收到新数据，已停止重试；可点击继续下载"
+	} else {
+		t.Error = err.Error()
+	}
 	t.SpeedBPS, t.ETASeconds = 0, 0
 	t.UpdatedAt = time.Now().UTC()
 	_ = m.DB.SaveTask(context.Background(), t)
-	_ = m.DB.AddTaskEvent(context.Background(), t.ID, "failed", fmt.Sprintf("下载失败（%s）：%v", t.FailureKind, err))
+	_ = m.DB.AddTaskEvent(context.Background(), t.ID, t.FailureKind, fmt.Sprintf("下载任务结束（%s）：%v", t.FailureKind, err))
 }
 
 func classify(err error) string {
