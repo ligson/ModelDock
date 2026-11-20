@@ -98,7 +98,7 @@ type PureGoAdapter struct{}
 
 func (PureGoAdapter) Name() string { return "pure-go" }
 func (PureGoAdapter) CanHandle(m model.Manifest) bool {
-	return pureGoAvailable() && strings.EqualFold(m.Format, "gguf") && (m.Source == "local" || m.LocalPath != "")
+	return pureGoAvailable() && strings.EqualFold(m.Format, "gguf") && !imageModel(m) && (m.Source == "local" || m.LocalPath != "")
 }
 func (PureGoAdapter) Detect(_ context.Context, m model.Manifest, _ host.Capability) Plan {
 	return pureGoDetect(m)

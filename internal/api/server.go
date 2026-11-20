@@ -434,6 +434,21 @@ func startComfyProcess(root string, port int, managed bool) error {
 	if err != nil {
 		return fmt.Errorf("ComfyUI 目录无效：%w", err)
 	}
+	if stdruntime.GOOS == "darwin" && strings.HasSuffix(strings.ToLower(root), ".app") {
+		if comfyHealth(port) {
+			return nil
+		}
+		if err := exec.Command("open", root).Run(); err != nil {
+			return fmt.Errorf("无法打开 Comfy Desktop：%w", err)
+		}
+		for i := 0; i < 120; i++ {
+			time.Sleep(500 * time.Millisecond)
+			if comfyHealth(port) {
+				return nil
+			}
+		}
+		return fmt.Errorf("Comfy Desktop 已打开，但 API 端口 %d 尚未就绪", port)
+	}
 	if info, err := os.Stat(filepath.Join(root, "main.py")); err != nil || info.IsDir() {
 		return fmt.Errorf("目录中没有 ComfyUI main.py")
 	}
@@ -1911,6 +1926,16 @@ func discoverComfyEngine(configured, mode, portText, autoUpdate string) runtimeE
 		e.Healthy = comfyHealth(port)
 		e.Detail = "已找到 ComfyUI；" + map[bool]string{true: "服务已连接", false: "服务未启动"}[e.Healthy]
 		return e
+	}
+	if stdruntime.GOOS == "darwin" {
+		for _, app := range []string{"/Applications/Comfy Desktop.app", filepath.Join(os.Getenv("HOME"), "Applications", "Comfy Desktop.app")} {
+			if info, err := os.Stat(app); err == nil && info.IsDir() {
+				e.Installed, e.Path, e.Source = true, app, "Comfy Desktop"
+				e.Healthy = comfyHealth(port)
+				e.Detail = "已找到 Comfy Desktop；" + map[bool]string{true: "服务已连接", false: "请打开 Comfy Desktop 启动服务"}[e.Healthy]
+				return e
+			}
+		}
 	}
 	if p, err := exec.LookPath("comfy"); err == nil {
 		e.Installed, e.Path, e.Source = true, p, "PATH"
