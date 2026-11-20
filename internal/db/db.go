@@ -57,6 +57,7 @@ func migrate(d *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_download_task_events_task ON download_task_events(task_id,id);
 	CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+	CREATE TABLE IF NOT EXISTS generation_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL);
 	CREATE TABLE IF NOT EXISTS storage_roots (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, name TEXT NOT NULL, is_default INTEGER NOT NULL DEFAULT 0, available INTEGER NOT NULL DEFAULT 0, last_scanned TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);`)
 	if err != nil {
 		return err
@@ -68,6 +69,34 @@ func migrate(d *sql.DB) error {
 		_, _ = d.Exec(q)
 	}
 	return nil
+}
+
+type GenerationJobRecord struct {
+	ID      string
+	Status  string
+	Payload string
+}
+
+func (d *DB) SaveGenerationJob(ctx context.Context, id, status, payload string) error {
+	_, err := d.SQL.ExecContext(ctx, `INSERT INTO generation_jobs(id,status,payload,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,payload=excluded.payload,updated_at=excluded.updated_at`, id, status, payload, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (d *DB) GenerationJobs(ctx context.Context) ([]GenerationJobRecord, error) {
+	rows, err := d.SQL.QueryContext(ctx, `SELECT id,status,payload FROM generation_jobs ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var jobs []GenerationJobRecord
+	for rows.Next() {
+		var job GenerationJobRecord
+		if err := rows.Scan(&job.ID, &job.Status, &job.Payload); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
 }
 
 func (d *DB) Setting(ctx context.Context, key, fallback string) string {

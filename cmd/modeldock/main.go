@@ -103,6 +103,9 @@ func main() {
 		Generations:   make(map[string]*api.GenerationJob),
 		Conversations: make(map[string][]api.ChatMessage),
 	}
+	if err := server.RestoreGenerationJobs(context.Background()); err != nil {
+		fatalf("restore generation jobs: %v", err)
+	}
 
 	httpServer := &http.Server{Addr: addr, Handler: server.Handler()}
 	go func() {

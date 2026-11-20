@@ -75,6 +75,54 @@ type GenerationJob struct {
 	Steps          []GenerationStep `json:"steps"`
 }
 
+func (s *Server) persistGeneration(job *GenerationJob) {
+	if s.DB == nil || job == nil {
+		return
+	}
+	payload, err := json.Marshal(job)
+	if err == nil {
+		_ = s.DB.SaveGenerationJob(context.Background(), job.ID, job.Status, string(payload))
+	}
+}
+
+// RestoreGenerationJobs reloads durable job records after a service restart.
+// Running jobs cannot be resumed safely because their worker process may be gone.
+func (s *Server) RestoreGenerationJobs(ctx context.Context) error {
+	records, err := s.DB.GenerationJobs(ctx)
+	if err != nil {
+		return err
+	}
+	if s.Generations == nil {
+		s.Generations = map[string]*GenerationJob{}
+	}
+	for _, record := range records {
+		var job GenerationJob
+		if json.Unmarshal([]byte(record.Payload), &job) != nil {
+			continue
+		}
+		if job.Status == "running" {
+			job.Status = "failed"
+			job.Phase = "failed"
+			job.Error = "服务重启导致任务中断；原运行进程未恢复"
+			job.Message = "任务已中断"
+			job.FinishedAt = time.Now().UTC()
+			for i := range job.Steps {
+				if job.Steps[i].Status == "running" || job.Steps[i].Status == "pending" {
+					job.Steps[i].Status = "error"
+					job.Steps[i].Detail = job.Error
+					job.Steps[i].FinishedAt = job.FinishedAt
+				}
+			}
+		}
+		copy := job
+		s.Generations[job.ID] = &copy
+		if job.Status == "failed" && record.Status == "running" {
+			s.persistGeneration(&copy)
+		}
+	}
+	return nil
+}
+
 type APIResponse struct {
 	Success  bool   `json:"success"`
 	Data     any    `json:"data"`
@@ -1521,6 +1569,7 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Generations[id] = job
 	s.GenerationMu.Unlock()
+	s.persistGeneration(job)
 	chatMessages := make([]runtime.Message, len(in.Messages))
 	for i, msg := range in.Messages {
 		chatMessages[i] = runtime.Message{Role: msg.Role, Content: msg.Content}
@@ -1549,6 +1598,7 @@ func (s *Server) runGeneration(job *GenerationJob, m model.Manifest, reg runtime
 		}
 		job.Phase = phase
 		job.Message = message
+		s.persistGeneration(job)
 	}
 	update("planning", "已选择 "+plan.Label+"，准备调用本地运行时")
 	update("loading", "正在加载模型和运行环境")
@@ -1594,6 +1644,7 @@ func (s *Server) runGeneration(job *GenerationJob, m model.Manifest, reg runtime
 			}
 		}
 		s.GenerationMu.Unlock()
+		s.persistGeneration(job)
 		return
 	}
 	update("testing", "检查生成结果并准备返回")
@@ -1627,6 +1678,7 @@ func (s *Server) runGeneration(job *GenerationJob, m model.Manifest, reg runtime
 		}
 	}
 	s.GenerationMu.Unlock()
+	s.persistGeneration(job)
 }
 
 func isArtifactPath(path string) bool {
@@ -1648,6 +1700,7 @@ func (s *Server) failGeneration(job *GenerationJob, err error) {
 			job.Steps[i].FinishedAt = job.FinishedAt
 		}
 	}
+	s.persistGeneration(job)
 }
 
 func (s *Server) generationJob(w http.ResponseWriter, r *http.Request) {
