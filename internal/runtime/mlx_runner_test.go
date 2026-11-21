@@ -66,3 +66,21 @@ func TestMLXProjectDoesNotTreatGenericH3MLXAsVideo(t *testing.T) {
 		t.Fatalf("got %q/%q", found, kind)
 	}
 }
+
+func TestMLXProjectAcceptsVideoOnlyH3MLXProject(t *testing.T) {
+	root := t.TempDir()
+	modelPath := filepath.Join(root, "models", "MiniMax-H3-MLX-4bit")
+	if err := os.MkdirAll(modelPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "generate-video.sh"), []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	found, kind, err := mlxProject(modelPath, model.Manifest{Name: "MiniMax-H3-MLX-4bit", Task: []string{"文本/图片"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found != root || kind != "video" {
+		t.Fatalf("got %q/%q", found, kind)
+	}
+}

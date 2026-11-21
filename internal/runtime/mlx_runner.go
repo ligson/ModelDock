@@ -112,6 +112,14 @@ func mlxProject(modelPath string, m model.Manifest) (root, kind string, err erro
 		kind = "image"
 	}
 	script := "generate-" + kind + ".sh"
+	// Some existing MiniMax H3 MLX manifests are tagged "文本/图片" even
+	// though their project only ships the video launcher. Accept that launcher
+	// during capability detection; the requested modality selects the script at
+	// generation time.
+	alternateScript := ""
+	if strings.Contains(strings.ToLower(m.Name+" "+m.ID), "h3-mlx") && kind == "image" {
+		alternateScript = "generate-video.sh"
+	}
 	// New installations keep launchers and their environments outside model
 	// storage. The legacy model-tree lookup below remains for existing installs.
 	for _, base := range mlxRuntimeRoots() {
@@ -119,11 +127,21 @@ func mlxProject(modelPath string, m model.Manifest) (root, kind string, err erro
 			if _, e := os.Stat(filepath.Join(dir, script)); e == nil {
 				return dir, kind, nil
 			}
+			if alternateScript != "" {
+				if _, e := os.Stat(filepath.Join(dir, alternateScript)); e == nil {
+					return dir, "video", nil
+				}
+			}
 		}
 	}
 	for dir := modelPath; ; {
 		if _, e := os.Stat(filepath.Join(dir, script)); e == nil {
 			return dir, kind, nil
+		}
+		if alternateScript != "" {
+			if _, e := os.Stat(filepath.Join(dir, alternateScript)); e == nil {
+				return dir, "video", nil
+			}
 		}
 		next := filepath.Dir(dir)
 		if next == dir {
