@@ -15,8 +15,9 @@ start() {
   if is_running; then echo "ModelDock 已运行（PID $(cat "$PID_FILE")，端口 ${PORT}）"; return 0; fi
   mkdir -p "$STATE_DIR" "$MODEL_ROOT"
   go build -o "$STATE_DIR/modeldock" ./cmd/modeldock
-  nohup "$STATE_DIR/modeldock" serve --addr "127.0.0.1:$PORT" --root "$MODEL_ROOT" >"$LOG_FILE" 2>&1 &
+  nohup "$STATE_DIR/modeldock" serve --addr "127.0.0.1:${PORT}" --root "$MODEL_ROOT" </dev/null >"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
+  disown 2>/dev/null || true
   if ! is_running; then echo "ModelDock 启动失败，查看 $LOG_FILE" >&2; return 1; fi
   for _ in {1..50}; do
     if curl -fsS "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then break; fi
