@@ -30,6 +30,9 @@ func mlxGenerateInput(ctx context.Context, m model.Manifest, input Input) (strin
 	if err != nil {
 		return "", err
 	}
+	if input.Options.Modality == "video" || input.Options.Modality == "image" {
+		kind = input.Options.Modality
+	}
 	if input.Prompt == "" {
 		return "", errors.New("请输入提示词")
 	}

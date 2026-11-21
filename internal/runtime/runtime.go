@@ -51,6 +51,7 @@ type Message struct {
 // ImageOptions contains the small set of image controls that can be safely
 // exposed to ordinary users. Zero values use the model project's defaults.
 type ImageOptions struct {
+	Modality        string  `json:"modality,omitempty"`
 	Size            string  `json:"size,omitempty"`
 	Steps           int     `json:"steps,omitempty"`
 	Guidance        float64 `json:"guidance,omitempty"`
