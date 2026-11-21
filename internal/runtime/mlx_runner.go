@@ -85,6 +85,7 @@ func mlxGenerateInput(ctx context.Context, m model.Manifest, input Input) (strin
 	if input.Options.PromptExpansion {
 		cmd.Env = append(cmd.Env, "H3_IMAGE_UPSAMPLE_PROMPT=1")
 	}
+	started := time.Now()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -96,7 +97,45 @@ func mlxGenerateInput(ctx context.Context, m model.Manifest, input Input) (strin
 		}
 		return "", fmt.Errorf("MLX 运行失败：%s", detail)
 	}
-	return outputPath, nil
+	if info, statErr := os.Stat(outputPath); statErr == nil && !info.IsDir() && info.Size() > 0 {
+		return outputPath, nil
+	}
+	// Some pinned model scripts ignore the requested filename and write to
+	// their own output directory. Recover the newest artifact from ModelDock's
+	// output directory before reporting failure.
+	if kind == "video" {
+		if recovered := newestArtifact(outDir, ".mp4", started); recovered != "" {
+			return recovered, nil
+		}
+	}
+	detail := strings.TrimSpace(string(output))
+	if detail == "" {
+		detail = "脚本未生成输出文件：" + outputPath
+	}
+	return "", fmt.Errorf("MLX 运行完成但没有生成结果：%s", detail)
+}
+
+func newestArtifact(dir, ext string, since time.Time) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var newest string
+	var newestTime time.Time
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ext) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() == 0 || info.ModTime().Before(since.Add(-2*time.Second)) {
+			continue
+		}
+		if newest == "" || info.ModTime().After(newestTime) {
+			newest = filepath.Join(dir, entry.Name())
+			newestTime = info.ModTime()
+		}
+	}
+	return newest
 }
 
 func mlxProject(modelPath string, m model.Manifest) (root, kind string, err error) {
