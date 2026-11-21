@@ -98,6 +98,12 @@ type PureGoAdapter struct{}
 
 func (PureGoAdapter) Name() string { return "pure-go" }
 func (PureGoAdapter) CanHandle(m model.Manifest) bool {
+	name := strings.ToLower(m.Name + " " + m.ID)
+	// The current golem qwen35 SSM path panics for DeepSeek-V4/Qwen3.5
+	// variants. Let llama.cpp handle these GGUF models instead.
+	if strings.Contains(name, "deepseek-v4") || strings.Contains(name, "qwen3.5") || strings.Contains(name, "qwen35") {
+		return false
+	}
 	return pureGoAvailable() && strings.EqualFold(m.Format, "gguf") && !imageModel(m) && (m.Source == "local" || m.LocalPath != "")
 }
 func (PureGoAdapter) Detect(_ context.Context, m model.Manifest, _ host.Capability) Plan {

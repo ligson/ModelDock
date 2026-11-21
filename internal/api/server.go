@@ -1580,6 +1580,11 @@ func (s *Server) generate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runGeneration(job *GenerationJob, m model.Manifest, reg runtime.Registry, plan runtime.Plan, input runtime.Input) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.failGeneration(job, fmt.Errorf("运行时崩溃：%v；已保护 ModelDock 主程序", recovered))
+		}
+	}()
 	update := func(phase, message string) {
 		s.GenerationMu.Lock()
 		defer s.GenerationMu.Unlock()

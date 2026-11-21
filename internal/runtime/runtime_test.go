@@ -26,3 +26,10 @@ func TestRegistryRoutesQwenImageAwayFromLlama(t *testing.T) {
 		t.Fatalf("adapter = %q, want comfyui", plan.Adapter)
 	}
 }
+
+func TestRegistryRoutesDeepSeekQwen35AwayFromPureGo(t *testing.T) {
+	m := model.Manifest{Source: "local", Format: "gguf", Name: "mradernacher/DeepSeek-V4-Pro-Qwen3.5-4B-UNCENSORED-heretic-GGUF"}
+	if got := NewRegistry().Plan(context.Background(), m, host.Capability{}).Adapter; got == "pure-go" {
+		t.Fatalf("DeepSeek Qwen3.5 must not use pure-go adapter")
+	}
+}
