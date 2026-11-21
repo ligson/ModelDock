@@ -70,6 +70,15 @@ func mlxGenerateInput(ctx context.Context, m model.Manifest, input Input) (strin
 	cmd := exec.CommandContext(ctx, "bash", append([]string{script}, args...)...)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "H3_IMAGE_MODEL_DIR="+modelPath, "H3_TRANSFORMER_DIR="+modelPath)
+	// launchctl does not inherit the interactive shell PATH. Include common
+	// package-manager locations so the worker can find ffmpeg and other tools.
+	pathValue := os.Getenv("PATH")
+	for _, dir := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"} {
+		if !strings.Contains(":"+pathValue+":", ":"+dir+":") {
+			pathValue += ":" + dir
+		}
+	}
+	cmd.Env = append(cmd.Env, "PATH="+pathValue)
 	if input.Options.Size != "" {
 		cmd.Env = append(cmd.Env, "H3_IMAGE_SIZE="+input.Options.Size)
 	}
